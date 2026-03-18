@@ -140,10 +140,18 @@ src_roas = [round(v, 1) for v in source_stats['ROAS']]
 src_profit = [round(v, 0) for v in source_stats['Profit']]
 src_spend = [round(v, 0) for v in source_stats['Total Cost']]
 
-# 3. Weekly ROAS D3 by source (from cohort data)
+# 3. Weekly ROAS D3 by source (from cohort data) — Fri-Thu weeks
 top_sources = paid.groupby('Source')['Total Cost'].sum().nlargest(6).index
-paid['YW'] = paid['Date'].dt.strftime('%Y-W%U')
+paid['FriStart'] = paid['Date'].apply(lambda d: d - pd.Timedelta(days=(d.weekday() - 4) % 7))
+paid['YW'] = paid['FriStart'].dt.strftime('%Y-%m-%d')
 weeks = sorted(paid['YW'].unique())
+
+# Build week labels for overview chart
+week_label_map = {}
+for wk_key, wk_grp in paid.groupby('YW')['FriStart']:
+    fri = wk_grp.iloc[0]
+    thu = fri + pd.Timedelta(days=6)
+    week_label_map[wk_key] = f"{fri.strftime('%d/%m')}-{thu.strftime('%d/%m')}"
 
 # Map campaign → source from paid data
 camp_source_map = paid.drop_duplicates('Campaign').set_index('Campaign')['Source'].to_dict()
@@ -151,21 +159,29 @@ camp_source_map = paid.drop_duplicates('Campaign').set_index('Campaign')['Source
 # Cohort D3 revenue by campaign × cohort week
 cohort_camp_d3 = cohort_camp.copy()
 cohort_camp_d3['Source'] = cohort_camp_d3['Campaign'].map(camp_source_map)
-cohort_camp_d3['YW'] = cohort_camp_d3['Cohort Day'].dt.strftime('%Y-W%U')
+cohort_camp_d3['YW'] = cohort_camp_d3['Cohort Day'].apply(lambda d: d - pd.Timedelta(days=(d.weekday() - 4) % 7)).dt.strftime('%Y-%m-%d')
 d3_col = rev_cols_map.get(3)
 
 weekly_source_data = {}
 if d3_col:
-    for col in ['Cost', d3_col]:
-        cohort_camp_d3[col] = pd.to_numeric(cohort_camp_d3[col], errors='coerce').fillna(0)
+    cohort_camp_d3[d3_col] = pd.to_numeric(cohort_camp_d3[d3_col], errors='coerce').fillna(0)
+    # Use cost from paid data per source per week
+    paid_src_week_cost = paid.groupby(['Source', 'YW'])['Total Cost'].sum()
     for src in top_sources:
         sname = src_short(src)
         src_cohort = cohort_camp_d3[cohort_camp_d3['Source'] == src]
-        weekly = src_cohort.groupby('YW').agg({'Cost': 'sum', d3_col: 'sum'}).reindex(weeks).fillna(0)
-        weekly['ROAS_D3'] = weekly[d3_col] / weekly['Cost'].replace(0, np.nan) * 100
-        weekly_source_data[sname] = [round(v, 1) if not pd.isna(v) else None for v in weekly['ROAS_D3']]
+        cohort_rev = src_cohort.groupby('YW')[d3_col].sum().reindex(weeks).fillna(0)
+        roas_vals = []
+        for w in weeks:
+            rev = cohort_rev.get(w, 0)
+            cost = paid_src_week_cost.get((src, w), 0)
+            if cost > 0 and rev > 0:
+                roas_vals.append(round(rev / cost * 100, 1))
+            else:
+                roas_vals.append(None)
+        weekly_source_data[sname] = roas_vals
 
-week_labels = [w.split('-')[1] for w in weeks]
+week_labels = [week_label_map.get(w, w.split('-')[1]) for w in weeks]
 
 # 4. Cohort ROAS curves
 camp_cost_total = paid.groupby('Campaign')['Total Cost'].sum().reset_index()
@@ -299,13 +315,18 @@ for camp in active_list:
     daily_dates = [d.strftime('%m/%d') for d in daily_camp['Date']]
 
     # Weekly performance with cohort ROAS D3/D7/D14/D28
+    # Week = Friday to Thursday (Thu 5 → Fri 6)
     cd_weekly = cd.copy()
-    cd_weekly['Week'] = cd_weekly['Date'].dt.strftime('%Y-W%U')
-    # Build week label map: YW -> "dd/mm-dd/mm"
+    # Shift so Friday is start of week: Friday.weekday()=4, shift by (day - 4) % 7
+    # Week starts on Friday: compute the Friday that starts each week
+    cd_weekly['FriStart'] = cd_weekly['Date'].apply(lambda d: d - pd.Timedelta(days=(d.weekday() - 4) % 7))
+    cd_weekly['Week'] = cd_weekly['FriStart'].dt.strftime('%Y-%m-%d')
+    # Build week label map: YW -> "dd/mm-dd/mm" (actual Fri-Thu range)
     week_date_range = {}
-    for wk_key, wk_grp in cd_weekly.groupby('Week')['Date']:
-        d_min = wk_grp.min(); d_max = wk_grp.max()
-        week_date_range[wk_key] = f"{d_min.strftime('%d/%m')}-{d_max.strftime('%d/%m')}"
+    for wk_key, wk_grp in cd_weekly.groupby('Week')['FriStart']:
+        fri = wk_grp.iloc[0]
+        thu = fri + pd.Timedelta(days=6)
+        week_date_range[wk_key] = f"{fri.strftime('%d/%m')}-{thu.strftime('%d/%m')}"
     weekly_camp = cd_weekly.groupby('Week').agg({'Total Cost': 'sum', 'Total Revenue': 'sum', 'Installs': 'sum', 'Impressions': 'sum', 'Clicks': 'sum'}).reset_index()
 
     # Cohort ROAS per week — revenue from cohort, cost from paid data
@@ -317,7 +338,7 @@ for camp in active_list:
         camp_cohort_wk = cohort_camp[cohort_camp['Campaign'] == camp.replace('Tier 0+1', 'Tier 0 1')].copy()
     cohort_week_roas = {}
     if len(camp_cohort_wk) > 0:
-        camp_cohort_wk['YW'] = camp_cohort_wk['Cohort Day'].dt.strftime('%Y-W%U')
+        camp_cohort_wk['YW'] = camp_cohort_wk['Cohort Day'].apply(lambda d: d - pd.Timedelta(days=(d.weekday() - 4) % 7)).dt.strftime('%Y-%m-%d')
         cohort_rev_cols = [rev_cols_map[d] for d in [3,7,14,28] if d in rev_cols_map]
         for nc in cohort_rev_cols:
             if nc in camp_cohort_wk.columns:
@@ -361,15 +382,16 @@ for camp in active_list:
             wp[f'roas_d{d}'] = cr_wk.get(f'd{d}', None)
         weekly_perf.append(wp)
 
-    # GEO × Weekly ROAS trend (last 8 weeks)
+    # GEO × Weekly ROAS trend (last 8 weeks) — Fri-Thu weeks
     camp_cd_geo = cd_paid[cd_paid['Campaign'] == camp].copy()
-    camp_cd_geo['YW'] = camp_cd_geo['Date'].dt.strftime('%Y-W%U')
+    camp_cd_geo['FriStart'] = camp_cd_geo['Date'].apply(lambda d: d - pd.Timedelta(days=(d.weekday() - 4) % 7))
+    camp_cd_geo['YW'] = camp_cd_geo['FriStart'].dt.strftime('%Y-%m-%d')
     recent_weeks = sorted(camp_cd_geo['YW'].unique())[-8:]
-    # Build geo week label map
     geo_week_labels = {}
-    for wk_key, wk_grp in camp_cd_geo.groupby('YW')['Date']:
-        d_min = wk_grp.min(); d_max = wk_grp.max()
-        geo_week_labels[wk_key] = f"{d_min.strftime('%d/%m')}-{d_max.strftime('%d/%m')}"
+    for wk_key, wk_grp in camp_cd_geo.groupby('YW')['FriStart']:
+        fri = wk_grp.iloc[0]
+        thu = fri + pd.Timedelta(days=6)
+        geo_week_labels[wk_key] = f"{fri.strftime('%d/%m')}-{thu.strftime('%d/%m')}"
     geo_weekly = []
     top_geos_list = camp_geo.head(5)['Country'].tolist()
     for geo_c in top_geos_list:
