@@ -294,23 +294,49 @@ for camp in active_list:
     daily_roas = daily_camp.apply(lambda r: round(r['Total Revenue']/r['Total Cost']*100, 1) if r['Total Cost'] > 0 else None, axis=1).tolist()
     daily_dates = [d.strftime('%m/%d') for d in daily_camp['Date']]
 
-    # Weekly performance
+    # Weekly performance with cohort ROAS D3/D7/D14/D28
     cd_weekly = cd.copy()
     cd_weekly['Week'] = cd_weekly['Date'].dt.strftime('%Y-W%U')
     weekly_camp = cd_weekly.groupby('Week').agg({'Total Cost': 'sum', 'Total Revenue': 'sum', 'Installs': 'sum', 'Impressions': 'sum', 'Clicks': 'sum'}).reset_index()
+
+    # Cohort ROAS per week from cohort data
+    camp_cohort_wk = cohort_camp[cohort_camp['Campaign'] == camp].copy()
+    cohort_week_roas = {}
+    if len(camp_cohort_wk) > 0:
+        camp_cohort_wk['YW'] = camp_cohort_wk['Cohort Day'].dt.strftime('%Y-W%U')
+        cohort_num_cols = ['Cost'] + [rev_cols_map[d] for d in [3,7,14,28] if d in rev_cols_map]
+        for nc in cohort_num_cols:
+            if nc in camp_cohort_wk.columns:
+                camp_cohort_wk[nc] = pd.to_numeric(camp_cohort_wk[nc], errors='coerce').fillna(0)
+        cohort_agg_cols = {c: 'sum' for c in cohort_num_cols if c in camp_cohort_wk.columns}
+        if cohort_agg_cols:
+            cwk = camp_cohort_wk.groupby('YW').agg(cohort_agg_cols).reset_index()
+            for _, cwr in cwk.iterrows():
+                wk_key = cwr['YW']
+                wk_roas = {}
+                for d in [3, 7, 14, 28]:
+                    if d in rev_cols_map and rev_cols_map[d] in cwk.columns and cwr['Cost'] > 0:
+                        wk_roas[f'd{d}'] = round(cwr[rev_cols_map[d]] / cwr['Cost'] * 100, 1)
+                cohort_week_roas[wk_key] = wk_roas
+
     weekly_perf = []
     for _, wr in weekly_camp.iterrows():
         w_cost = wr['Total Cost']; w_rev = wr['Total Revenue']; w_inst = wr['Installs']
         w_imp = wr['Impressions']; w_click = wr['Clicks']
         if w_cost <= 0 and w_inst <= 0: continue
-        weekly_perf.append({
+        wp = {
             'week': wr['Week'].split('-')[1],
             'cost': round(w_cost, 2), 'revenue': round(w_rev, 2), 'installs': int(w_inst),
             'cpi': round(w_cost / w_inst, 4) if w_inst > 0 else 0,
-            'roas': round(w_rev / w_cost * 100, 1) if w_cost > 0 else 0,
+            'roas_lt': round(w_rev / w_cost * 100, 1) if w_cost > 0 else 0,
             'ctr': round(w_click / w_imp * 100, 2) if w_imp > 0 else 0,
             'ipm': round(w_inst / w_imp * 1000, 1) if w_imp > 0 else 0,
-        })
+        }
+        # Add cohort ROAS D3/D7/D14/D28
+        cr_wk = cohort_week_roas.get(wr['Week'], {})
+        for d in [3, 7, 14, 28]:
+            wp[f'roas_d{d}'] = cr_wk.get(f'd{d}', None)
+        weekly_perf.append(wp)
 
     # GEO × Weekly ROAS trend (last 8 weeks)
     camp_cd_geo = cd_paid[cd_paid['Campaign'] == camp].copy()
@@ -817,14 +843,18 @@ function renderCampList(filter) {
     let weeklyHtml = '';
     if (c.weeklyPerf && c.weeklyPerf.length > 0) {
       weeklyHtml = `<div class="section-title">Performance theo Tuần</div>
-        <table class="geo-table"><thead><tr><th>Tuần</th><th>Spend</th><th>Installs</th><th>CPI</th><th>Revenue</th><th>ROAS</th><th>CTR</th><th>IPM</th></tr></thead><tbody>
+        <div style="overflow-x:auto"><table class="geo-table"><thead><tr><th>Tuần</th><th>Spend</th><th>Installs</th><th>CPI</th><th>ROAS D3</th><th>ROAS D7</th><th>ROAS D14</th><th>ROAS D28</th><th>ROAS LT</th><th>CTR</th><th>IPM</th></tr></thead><tbody>
         ${c.weeklyPerf.map(w => `<tr>
           <td>${w.week}</td><td style="text-align:right">${fmtK(w.cost)}</td><td style="text-align:right">${w.installs.toLocaleString()}</td>
-          <td style="text-align:right">$${w.cpi.toFixed(4)}</td><td style="text-align:right">${fmtK(w.revenue)}</td>
-          <td style="text-align:right" class="${w.roas>=100?'roas-good':'roas-bad'}">${fmtPct(w.roas)}</td>
+          <td style="text-align:right">$${w.cpi.toFixed(4)}</td>
+          <td style="text-align:right">${w.roas_d3!=null?'<span class="'+(w.roas_d3>=100?'roas-good':'roas-bad')+'">'+fmtPct(w.roas_d3)+'</span>':'—'}</td>
+          <td style="text-align:right">${w.roas_d7!=null?'<span class="'+(w.roas_d7>=100?'roas-good':'roas-bad')+'">'+fmtPct(w.roas_d7)+'</span>':'—'}</td>
+          <td style="text-align:right">${w.roas_d14!=null?'<span class="'+(w.roas_d14>=100?'roas-good':'roas-bad')+'">'+fmtPct(w.roas_d14)+'</span>':'—'}</td>
+          <td style="text-align:right">${w.roas_d28!=null?'<span class="'+(w.roas_d28>=100?'roas-good':'roas-bad')+'">'+fmtPct(w.roas_d28)+'</span>':'—'}</td>
+          <td style="text-align:right" class="${w.roas_lt>=100?'roas-good':'roas-bad'}">${fmtPct(w.roas_lt)}</td>
           <td style="text-align:right">${w.ctr.toFixed(2)}%</td><td style="text-align:right">${w.ipm.toFixed(1)}</td>
         </tr>`).join('')}
-        </tbody></table>`;
+        </tbody></table></div>`;
     }
 
     // GEO × Weekly ROAS trend
