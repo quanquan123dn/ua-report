@@ -301,6 +301,11 @@ for camp in active_list:
     # Weekly performance with cohort ROAS D3/D7/D14/D28
     cd_weekly = cd.copy()
     cd_weekly['Week'] = cd_weekly['Date'].dt.strftime('%Y-W%U')
+    # Build week label map: YW -> "dd/mm-dd/mm"
+    week_date_range = {}
+    for wk_key, wk_grp in cd_weekly.groupby('Week')['Date']:
+        d_min = wk_grp.min(); d_max = wk_grp.max()
+        week_date_range[wk_key] = f"{d_min.strftime('%d/%m')}-{d_max.strftime('%d/%m')}"
     weekly_camp = cd_weekly.groupby('Week').agg({'Total Cost': 'sum', 'Total Revenue': 'sum', 'Installs': 'sum', 'Impressions': 'sum', 'Clicks': 'sum'}).reset_index()
 
     # Cohort ROAS per week — revenue from cohort, cost from paid data
@@ -329,8 +334,13 @@ for camp in active_list:
                 wk_roas = {}
                 for d in [3, 7, 14, 28]:
                     if d in rev_cols_map and rev_cols_map[d] in cwk.columns:
-                        wk_roas[f'd{d}'] = round(cwr[rev_cols_map[d]] / wk_cost * 100, 1)
-                cohort_week_roas[wk_key] = wk_roas
+                        rev_val = cwr[rev_cols_map[d]]
+                        if rev_val > 0:
+                            wk_roas[f'd{d}'] = round(rev_val / wk_cost * 100, 1)
+                if wk_roas:
+                    cohort_week_roas[wk_key] = wk_roas
+            # Also fill weeks that have paid cost but no cohort data yet
+            # (cohort export may not cover all weeks)
 
     weekly_perf = []
     for _, wr in weekly_camp.iterrows():
@@ -338,7 +348,7 @@ for camp in active_list:
         w_imp = wr['Impressions']; w_click = wr['Clicks']
         if w_cost <= 0 and w_inst <= 0: continue
         wp = {
-            'week': wr['Week'].split('-')[1],
+            'week': week_date_range.get(wr['Week'], wr['Week'].split('-')[1]),
             'cost': round(w_cost, 2), 'revenue': round(w_rev, 2), 'installs': int(w_inst),
             'cpi': round(w_cost / w_inst, 4) if w_inst > 0 else 0,
             'roas_lt': round(w_rev / w_cost * 100, 1) if w_cost > 0 else 0,
@@ -355,6 +365,11 @@ for camp in active_list:
     camp_cd_geo = cd_paid[cd_paid['Campaign'] == camp].copy()
     camp_cd_geo['YW'] = camp_cd_geo['Date'].dt.strftime('%Y-W%U')
     recent_weeks = sorted(camp_cd_geo['YW'].unique())[-8:]
+    # Build geo week label map
+    geo_week_labels = {}
+    for wk_key, wk_grp in camp_cd_geo.groupby('YW')['Date']:
+        d_min = wk_grp.min(); d_max = wk_grp.max()
+        geo_week_labels[wk_key] = f"{d_min.strftime('%d/%m')}-{d_max.strftime('%d/%m')}"
     geo_weekly = []
     top_geos_list = camp_geo.head(5)['Country'].tolist()
     for geo_c in top_geos_list:
@@ -364,7 +379,7 @@ for camp in active_list:
             wk_cost = wk_d['Total Cost'].sum(); wk_rev = wk_d['Total Revenue'].sum(); wk_inst = wk_d['Installs'].sum()
             if wk_cost <= 0 and wk_inst <= 0: continue
             geo_weekly.append({
-                'geo': geo_c, 'week': wk.split('-')[1],
+                'geo': geo_c, 'week': geo_week_labels.get(wk, wk.split('-')[1]),
                 'cost': round(wk_cost, 2), 'revenue': round(wk_rev, 2), 'installs': int(wk_inst),
                 'cpi': round(wk_cost / wk_inst, 4) if wk_inst > 0 else 0,
                 'roas': round(wk_rev / wk_cost * 100, 1) if wk_cost > 0 else 0,
