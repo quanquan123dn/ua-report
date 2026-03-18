@@ -260,8 +260,12 @@ for camp in active_list:
         ipi_l = last7c['Impressions'].sum() / last7c['Installs'].sum() if last7c['Installs'].sum() > 0 else 0
         if ipi_f > 0: sat = round((ipi_l - ipi_f) / ipi_f * 100, 0)
 
-    # Cohort
+    # Cohort (try fuzzy match for Tier naming)
     cr = camp_cohort_agg[camp_cohort_agg['Campaign'] == camp]
+    if len(cr) == 0:
+        cr = camp_cohort_agg[camp_cohort_agg['Campaign'] == camp.replace('Tier 0 1', 'Tier 0+1')]
+    if len(cr) == 0:
+        cr = camp_cohort_agg[camp_cohort_agg['Campaign'] == camp.replace('Tier 0+1', 'Tier 0 1')]
     cohort_roas = {}
     if len(cr) > 0:
         cr = cr.iloc[0]
@@ -299,24 +303,33 @@ for camp in active_list:
     cd_weekly['Week'] = cd_weekly['Date'].dt.strftime('%Y-W%U')
     weekly_camp = cd_weekly.groupby('Week').agg({'Total Cost': 'sum', 'Total Revenue': 'sum', 'Installs': 'sum', 'Impressions': 'sum', 'Clicks': 'sum'}).reset_index()
 
-    # Cohort ROAS per week from cohort data
+    # Cohort ROAS per week — revenue from cohort, cost from paid data
+    # Try exact match first, then fuzzy match (partners may have "Tier 0 1" vs cohort "Tier 0+1")
     camp_cohort_wk = cohort_camp[cohort_camp['Campaign'] == camp].copy()
+    if len(camp_cohort_wk) == 0:
+        camp_cohort_wk = cohort_camp[cohort_camp['Campaign'] == camp.replace('Tier 0 1', 'Tier 0+1')].copy()
+    if len(camp_cohort_wk) == 0:
+        camp_cohort_wk = cohort_camp[cohort_camp['Campaign'] == camp.replace('Tier 0+1', 'Tier 0 1')].copy()
     cohort_week_roas = {}
     if len(camp_cohort_wk) > 0:
         camp_cohort_wk['YW'] = camp_cohort_wk['Cohort Day'].dt.strftime('%Y-W%U')
-        cohort_num_cols = ['Cost'] + [rev_cols_map[d] for d in [3,7,14,28] if d in rev_cols_map]
-        for nc in cohort_num_cols:
+        cohort_rev_cols = [rev_cols_map[d] for d in [3,7,14,28] if d in rev_cols_map]
+        for nc in cohort_rev_cols:
             if nc in camp_cohort_wk.columns:
                 camp_cohort_wk[nc] = pd.to_numeric(camp_cohort_wk[nc], errors='coerce').fillna(0)
-        cohort_agg_cols = {c: 'sum' for c in cohort_num_cols if c in camp_cohort_wk.columns}
+        cohort_agg_cols = {c: 'sum' for c in cohort_rev_cols if c in camp_cohort_wk.columns}
         if cohort_agg_cols:
             cwk = camp_cohort_wk.groupby('YW').agg(cohort_agg_cols).reset_index()
+            # Get cost from paid data per week (more reliable than cohort Cost which can be 0)
+            paid_week_cost = cd_weekly.groupby('Week')['Total Cost'].sum()
             for _, cwr in cwk.iterrows():
                 wk_key = cwr['YW']
+                wk_cost = paid_week_cost.get(wk_key, 0)
+                if wk_cost <= 0: continue
                 wk_roas = {}
                 for d in [3, 7, 14, 28]:
-                    if d in rev_cols_map and rev_cols_map[d] in cwk.columns and cwr['Cost'] > 0:
-                        wk_roas[f'd{d}'] = round(cwr[rev_cols_map[d]] / cwr['Cost'] * 100, 1)
+                    if d in rev_cols_map and rev_cols_map[d] in cwk.columns:
+                        wk_roas[f'd{d}'] = round(cwr[rev_cols_map[d]] / wk_cost * 100, 1)
                 cohort_week_roas[wk_key] = wk_roas
 
     weekly_perf = []
@@ -360,6 +373,10 @@ for camp in active_list:
     # Ad-level performance from cohort
     ad_perf = []
     camp_cohort_ads = cohort_camp[cohort_camp['Campaign'] == camp].copy()
+    if len(camp_cohort_ads) == 0:
+        camp_cohort_ads = cohort_camp[cohort_camp['Campaign'] == camp.replace('Tier 0 1', 'Tier 0+1')].copy()
+    if len(camp_cohort_ads) == 0:
+        camp_cohort_ads = cohort_camp[cohort_camp['Campaign'] == camp.replace('Tier 0+1', 'Tier 0 1')].copy()
     if len(camp_cohort_ads) > 0 and 'Ad' in camp_cohort_ads.columns:
         num_cols = ['Cost', 'Users'] + [rev_cols_map[d] for d in [0,3,7,14,30] if d in rev_cols_map]
         for nc in num_cols:
