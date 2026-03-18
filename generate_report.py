@@ -431,6 +431,51 @@ for camp in active_list:
                     ae[f'roas_d{d}'] = round(ar[rev_cols_map[d]] / ar['Cost'] * 100, 1)
             ad_perf.append(ae)
 
+    # Ad × Weekly ROAS breakdown from cohort
+    ad_weekly = []
+    if len(camp_cohort_ads) > 0 and 'Ad' in camp_cohort_ads.columns:
+        camp_cohort_ads['FriStart'] = camp_cohort_ads['Cohort Day'].apply(lambda d: d - pd.Timedelta(days=(d.weekday() - 4) % 7))
+        camp_cohort_ads['YW'] = camp_cohort_ads['FriStart'].dt.strftime('%Y-%m-%d')
+        # Get top ads by total revenue
+        top_ads = camp_cohort_ads.groupby('Ad')[rev_cols_map.get(7, rev_cols_map.get(3, 'Users'))].sum().nlargest(8).index.tolist()
+        # Get paid cost per week for this campaign
+        paid_wk_cost_camp = cd_weekly.groupby('Week')['Total Cost'].sum()
+        ad_wk_weeks = sorted(camp_cohort_ads['YW'].unique())[-8:]
+        # Build ad week labels
+        ad_wk_labels = {}
+        for yw in ad_wk_weeks:
+            fri = pd.Timestamp(yw)
+            thu = fri + pd.Timedelta(days=6)
+            ad_wk_labels[yw] = f"{fri.strftime('%d/%m')}-{thu.strftime('%d/%m')}"
+        for ad_name in top_ads:
+            ad_data = camp_cohort_ads[camp_cohort_ads['Ad'] == ad_name]
+            for yw in ad_wk_weeks:
+                ad_wk_data = ad_data[ad_data['YW'] == yw]
+                if len(ad_wk_data) == 0: continue
+                wk_cost = paid_wk_cost_camp.get(yw, 0)
+                if wk_cost <= 0: continue
+                # Revenue share of this ad vs total campaign revenue for proportional cost
+                total_wk_rev_d7 = 0
+                ad_wk_rev_d7 = 0
+                for d in [7]:
+                    if d in rev_cols_map and rev_cols_map[d] in ad_wk_data.columns:
+                        ad_wk_rev_d7 = ad_wk_data[rev_cols_map[d]].sum()
+                        all_ads_wk = camp_cohort_ads[camp_cohort_ads['YW'] == yw]
+                        total_wk_rev_d7 = all_ads_wk[rev_cols_map[d]].sum()
+                entry = {'ad': str(ad_name)[:50] if pd.notna(ad_name) else 'Unknown',
+                         'week': ad_wk_labels.get(yw, yw)}
+                for d in [3, 7, 14, 28]:
+                    if d in rev_cols_map and rev_cols_map[d] in ad_wk_data.columns:
+                        rev = ad_wk_data[rev_cols_map[d]].sum()
+                        if rev > 0 and wk_cost > 0:
+                            # Use proportional cost based on ad's share of users
+                            ad_users = ad_wk_data['Users'].sum()
+                            total_users = camp_cohort_ads[camp_cohort_ads['YW'] == yw]['Users'].sum()
+                            ad_cost = wk_cost * (ad_users / total_users) if total_users > 0 else 0
+                            entry[f'd{d}'] = round(rev / ad_cost * 100, 1) if ad_cost > 0 else None
+                if any(k.startswith('d') for k in entry):
+                    ad_weekly.append(entry)
+
     # Decline detection signals
     signals = []
     if roas_7d < roas * 0.7 and cost_7d > 50 and not test_flag:
@@ -504,7 +549,7 @@ for camp in active_list:
         'cohortRoas': cohort_roas,
         'funnel': {'tut': round(tut/t_inst*100, 1), 's3': round(s3/t_inst*100, 1),
                    's5': round(s5/t_inst*100, 1), 'purchase': round(purch/t_inst*100, 2)},
-        'geos': geos, 'geoWeekly': geo_weekly, 'adPerf': ad_perf, 'signals': signals,
+        'geos': geos, 'geoWeekly': geo_weekly, 'adPerf': ad_perf, 'adWeekly': ad_weekly, 'signals': signals,
         'score': score, 'action': action, 'issues': issues,
         'dailyDates': daily_dates, 'dailyRoas': daily_roas, 'weeklyPerf': weekly_perf,
         'scoreBreakdown': {'cpi': cpi_s, 'roas': roas_s, 'trend': trend_s, 'ctr': ctr_s, 'quality': qual_s}
@@ -946,6 +991,24 @@ function renderCampList(filter) {
         </tbody></table>`;
     }
 
+    // Ad × Weekly ROAS breakdown
+    let adWeeklyHtml = '';
+    if (c.adWeekly && c.adWeekly.length > 0) {
+      const adNames = [...new Set(c.adWeekly.map(a=>a.ad))];
+      const adWeeks = [...new Set(c.adWeekly.map(a=>a.week))];
+      adWeeklyHtml = `<div class="section-title">ROAS D7 theo Ad × Tuần</div>
+        <div style="overflow-x:auto"><table class="geo-table"><thead><tr><th>Ad</th>${adWeeks.map(w=>'<th>'+w+'</th>').join('')}</tr></thead><tbody>
+        ${adNames.map(ad => {
+          const aData = c.adWeekly.filter(a=>a.ad===ad);
+          return '<tr><td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+ad+'">'+ad+'</td>' + adWeeks.map(w => {
+            const d = aData.find(a=>a.week===w);
+            if (!d || d.d7==null) return '<td style="text-align:right;color:var(--text2)">—</td>';
+            return '<td style="text-align:right" class="'+(d.d7>=100?'roas-good':'roas-bad')+'">'+fmtPct(d.d7)+'</td>';
+          }).join('') + '</tr>';
+        }).join('')}
+        </tbody></table></div>`;
+    }
+
     // GEO static breakdown
     let geoHtml = '';
     if (c.geos.length > 0) {
@@ -989,6 +1052,7 @@ function renderCampList(filter) {
         ${weeklyHtml}
         ${geoWeeklyHtml}
         ${adHtml}
+        ${adWeeklyHtml}
         ${geoHtml}
       </div>
     </div>`;
