@@ -140,17 +140,31 @@ src_roas = [round(v, 1) for v in source_stats['ROAS']]
 src_profit = [round(v, 0) for v in source_stats['Profit']]
 src_spend = [round(v, 0) for v in source_stats['Total Cost']]
 
-# 3. Weekly ROAS by source
+# 3. Weekly ROAS D3 by source (from cohort data)
 top_sources = paid.groupby('Source')['Total Cost'].sum().nlargest(6).index
 paid['YW'] = paid['Date'].dt.strftime('%Y-W%U')
 weeks = sorted(paid['YW'].unique())
+
+# Map campaign → source from paid data
+camp_source_map = paid.drop_duplicates('Campaign').set_index('Campaign')['Source'].to_dict()
+
+# Cohort D3 revenue by campaign × cohort week
+cohort_camp_d3 = cohort_camp.copy()
+cohort_camp_d3['Source'] = cohort_camp_d3['Campaign'].map(camp_source_map)
+cohort_camp_d3['YW'] = cohort_camp_d3['Cohort Day'].dt.strftime('%Y-W%U')
+d3_col = rev_cols_map.get(3)
+
 weekly_source_data = {}
-for src in top_sources:
-    sname = src_short(src)
-    src_data = paid[paid['Source'] == src]
-    weekly = src_data.groupby('YW').agg({'Total Cost': 'sum', 'Total Revenue': 'sum'}).reindex(weeks).fillna(0)
-    weekly['ROAS'] = weekly['Total Revenue'] / weekly['Total Cost'].replace(0, np.nan) * 100
-    weekly_source_data[sname] = [round(v, 1) if not pd.isna(v) else None for v in weekly['ROAS']]
+if d3_col:
+    for col in ['Cost', d3_col]:
+        cohort_camp_d3[col] = pd.to_numeric(cohort_camp_d3[col], errors='coerce').fillna(0)
+    for src in top_sources:
+        sname = src_short(src)
+        src_cohort = cohort_camp_d3[cohort_camp_d3['Source'] == src]
+        weekly = src_cohort.groupby('YW').agg({'Cost': 'sum', d3_col: 'sum'}).reindex(weeks).fillna(0)
+        weekly['ROAS_D3'] = weekly[d3_col] / weekly['Cost'].replace(0, np.nan) * 100
+        weekly_source_data[sname] = [round(v, 1) if not pd.isna(v) else None for v in weekly['ROAS_D3']]
+
 week_labels = [w.split('-')[1] for w in weeks]
 
 # 4. Cohort ROAS curves
@@ -628,7 +642,7 @@ function renderSources(el) {
     <div class="card"><h2>ROAS theo Source</h2><div class="chart-container"><canvas id="srcRoas"></canvas></div></div>
     <div class="card"><h2>Lãi / Lỗ theo Source</h2><div class="chart-container"><canvas id="srcProfit"></canvas></div></div>
   </div>
-  <div class="card"><h2>ROAS theo Tuần × Source</h2><div class="chart-container-lg"><canvas id="weeklyRoas"></canvas></div></div>
+  <div class="card"><h2>ROAS D3 theo Tuần × Source</h2><div class="chart-container-lg"><canvas id="weeklyRoas"></canvas></div></div>
   <div class="card"><h2>Phân bổ Spend</h2><div class="chart-container"><canvas id="spendPie"></canvas></div></div>`;
   el.innerHTML = html;
 
