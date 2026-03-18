@@ -312,6 +312,68 @@ for camp in active_list:
             'ipm': round(w_inst / w_imp * 1000, 1) if w_imp > 0 else 0,
         })
 
+    # GEO × Weekly ROAS trend (last 8 weeks)
+    camp_cd_geo = cd_paid[cd_paid['Campaign'] == camp].copy()
+    camp_cd_geo['YW'] = camp_cd_geo['Date'].dt.strftime('%Y-W%U')
+    recent_weeks = sorted(camp_cd_geo['YW'].unique())[-8:]
+    geo_weekly = []
+    top_geos_list = camp_geo.head(5)['Country'].tolist()
+    for geo_c in top_geos_list:
+        geo_cd = camp_cd_geo[camp_cd_geo['Country'] == geo_c]
+        for wk in recent_weeks:
+            wk_d = geo_cd[geo_cd['YW'] == wk]
+            wk_cost = wk_d['Total Cost'].sum(); wk_rev = wk_d['Total Revenue'].sum(); wk_inst = wk_d['Installs'].sum()
+            if wk_cost <= 0 and wk_inst <= 0: continue
+            geo_weekly.append({
+                'geo': geo_c, 'week': wk.split('-')[1],
+                'cost': round(wk_cost, 2), 'revenue': round(wk_rev, 2), 'installs': int(wk_inst),
+                'cpi': round(wk_cost / wk_inst, 4) if wk_inst > 0 else 0,
+                'roas': round(wk_rev / wk_cost * 100, 1) if wk_cost > 0 else 0,
+            })
+
+    # Ad-level performance from cohort
+    ad_perf = []
+    camp_cohort_ads = cohort_camp[cohort_camp['Campaign'] == camp].copy()
+    if len(camp_cohort_ads) > 0 and 'Ad' in camp_cohort_ads.columns:
+        num_cols = ['Cost', 'Users'] + [rev_cols_map[d] for d in [0,3,7,14,30] if d in rev_cols_map]
+        for nc in num_cols:
+            if nc in camp_cohort_ads.columns:
+                camp_cohort_ads[nc] = pd.to_numeric(camp_cohort_ads[nc], errors='coerce').fillna(0)
+        ad_agg = camp_cohort_ads.groupby('Ad').agg(
+            {**{'Users': 'sum', 'Cost': 'sum'}, **{rev_cols_map[d]: 'sum' for d in [0,3,7,14,30] if d in rev_cols_map and rev_cols_map[d] in camp_cohort_ads.columns}}
+        ).reset_index()
+        ad_agg = ad_agg[ad_agg['Cost'] > 10].sort_values('Cost', ascending=False).head(10)
+        for _, ar in ad_agg.iterrows():
+            ae = {'ad': str(ar['Ad'])[:60] if pd.notna(ar['Ad']) else 'Unknown',
+                  'users': int(ar['Users']), 'cost': round(ar['Cost'], 2)}
+            for d in [3, 7, 14, 30]:
+                if d in rev_cols_map and rev_cols_map[d] in ad_agg.columns and ar['Cost'] > 0:
+                    ae[f'roas_d{d}'] = round(ar[rev_cols_map[d]] / ar['Cost'] * 100, 1)
+            ad_perf.append(ae)
+
+    # Decline detection signals
+    signals = []
+    if roas_7d < roas * 0.7 and cost_7d > 50 and not test_flag:
+        signals.append({'type': 'roas', 'sev': 'high', 'msg': f'ROAS 7D ({roas_7d:.1f}%) giảm mạnh so với tổng ({roas:.1f}%)'})
+    elif roas_7d < roas * 0.85 and cost_7d > 50 and not test_flag:
+        signals.append({'type': 'roas', 'sev': 'med', 'msg': f'ROAS 7D ({roas_7d:.1f}%) đang giảm so với tổng ({roas:.1f}%)'})
+    if cpi_change > 30 and cost_7d > 50:
+        signals.append({'type': 'cpi', 'sev': 'high', 'msg': f'CPI tăng {cpi_change:.0f}% trong 7 ngày (${cpi_p7:.4f} → ${cpi_7d:.4f})'})
+    elif cpi_change > 15 and cost_7d > 50:
+        signals.append({'type': 'cpi', 'sev': 'med', 'msg': f'CPI tăng {cpi_change:.0f}% trong 7 ngày'})
+    if cost_change < -30 and cost_p7 > 50:
+        signals.append({'type': 'spend', 'sev': 'med', 'msg': f'Spend giảm {abs(cost_change):.0f}% — campaign có thể đang bị limited'})
+    if inst_change < -50 and inst_p7 > 20:
+        signals.append({'type': 'installs', 'sev': 'high', 'msg': f'Installs giảm {abs(inst_change):.0f}% trong 7 ngày'})
+    if sat and sat > 100:
+        signals.append({'type': 'saturation', 'sev': 'high', 'msg': f'Audience bão hòa nặng (IPI +{sat:.0f}%)'})
+    elif sat and sat > 50:
+        signals.append({'type': 'saturation', 'sev': 'med', 'msg': f'Audience đang bão hòa (IPI +{sat:.0f}%)'})
+    # GEO-specific decline
+    for gi in geos[:5]:
+        if gi['roas'] < 50 and gi['cost'] > 100:
+            signals.append({'type': 'geo', 'sev': 'high', 'msg': f"GEO {gi['country']} ROAS rất thấp ({gi['roas']:.1f}%) với spend ${gi['cost']:.0f}"})
+
     # Health score
     if bm:
         bm_mid = (bm[0]+bm[1])/2
@@ -362,7 +424,8 @@ for camp in active_list:
         'cohortRoas': cohort_roas,
         'funnel': {'tut': round(tut/t_inst*100, 1), 's3': round(s3/t_inst*100, 1),
                    's5': round(s5/t_inst*100, 1), 'purchase': round(purch/t_inst*100, 2)},
-        'geos': geos, 'score': score, 'action': action, 'issues': issues,
+        'geos': geos, 'geoWeekly': geo_weekly, 'adPerf': ad_perf, 'signals': signals,
+        'score': score, 'action': action, 'issues': issues,
         'dailyDates': daily_dates, 'dailyRoas': daily_roas, 'weeklyPerf': weekly_perf,
         'scoreBreakdown': {'cpi': cpi_s, 'roas': roas_s, 'trend': trend_s, 'ctr': ctr_s, 'quality': qual_s}
     })
@@ -548,13 +611,9 @@ h3 { font-size: 16px; font-weight: 600; color: var(--text2); margin-bottom: 8px;
 </div>
 
 <nav class="nav" id="mainNav">
-  <button class="nav-btn active" onclick="showSection('overview')">Tổng quan</button>
-  <button class="nav-btn" onclick="showSection('sources')">Sources</button>
-  <button class="nav-btn" onclick="showSection('cohort')">ROAS Cohort</button>
-  <button class="nav-btn" onclick="showSection('geo')">GEO</button>
-  <button class="nav-btn" onclick="showSection('campaigns')">Campaigns</button>
-  <button class="nav-btn" onclick="showSection('problems')">Vấn đề</button>
-  <button class="nav-btn" onclick="showSection('action')">Action Plan</button>
+  <button class="nav-btn active" onclick="showSection('overview')">📊 Tổng quan</button>
+  <button class="nav-btn" onclick="showSection('detail')">🔍 Chi tiết Campaign</button>
+  <button class="nav-btn" onclick="showSection('action')">🎯 Action Plan</button>
 </nav>
 
 <div id="sections"></div>
@@ -578,18 +637,16 @@ function showSection(id) {
   event.target.classList.add('active');
   const el = document.getElementById('sections');
   el.innerHTML = '';
-  if (id === 'overview') renderOverview(el);
-  else if (id === 'sources') renderSources(el);
-  else if (id === 'cohort') renderCohort(el);
-  else if (id === 'geo') renderGeo(el);
-  else if (id === 'campaigns') renderCampaigns(el);
-  else if (id === 'problems') renderProblems(el);
+  if (id === 'overview') renderFullOverview(el);
+  else if (id === 'detail') renderDetailCampaigns(el);
   else if (id === 'action') renderAction(el);
 }
 
-function renderOverview(el) {
+function renderFullOverview(el) {
   const s = DATA.summary;
   const roasClass = s.roas >= 100 ? 'kpi-good' : 'kpi-bad';
+
+  // --- KPI + Alert + MoM ---
   let html = `
   <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Paid Installs</div><div class="kpi-value">${s.totalInstalls.toLocaleString()}</div><div class="kpi-sub">Organic: ${s.organicInstalls.toLocaleString()}</div></div>
@@ -602,13 +659,6 @@ function renderOverview(el) {
     <div class="kpi"><div class="kpi-label">Loyal Rate</div><div class="kpi-value">${fmtPct(s.loyal)}</div></div>
   </div>
 
-  <div class="alert"><h3>⚠️ Cảnh báo: ROAS suy giảm nghiêm trọng</h3><ul>
-    <li>ROAS tháng: ${DATA.mom.map(m => m.month + '=' + fmtPct(m.roas)).join(' → ')}</li>
-    <li>ARPU tháng: ${DATA.mom.map(m => m.month + '=$' + m.arpu.toFixed(4)).join(' → ')}</li>
-    <li>ARPU Organic cũng giảm → Vấn đề từ game monetization, không chỉ UA</li>
-    <li>ROAS Cohort D30 chỉ 37-65% → User chưa payback trong 30 ngày</li>
-  </ul></div>
-
   <div class="card"><h2>MoM Performance</h2>
   <table class="mom-table"><thead><tr><th>Tháng</th><th>Spend</th><th>Revenue</th><th>ROAS</th><th>Installs</th><th>CPI</th><th>ARPU</th></tr></thead><tbody>
   ${DATA.mom.map(m => `<tr><td>${m.month}</td><td>${fmtK(m.cost)}</td><td>${fmtK(m.revenue)}</td><td class="${m.roas >= 100 ? 'roas-good' : 'roas-bad'}">${fmtPct(m.roas)}</td><td>${m.installs.toLocaleString()}</td><td>$${m.cpi.toFixed(4)}</td><td>$${m.arpu.toFixed(4)}</td></tr>`).join('')}
@@ -618,9 +668,54 @@ function renderOverview(el) {
   <div class="chart-row">
     <div class="card"><h2>ARPU Trend — Paid vs Organic</h2><div class="chart-container"><canvas id="arpuChart"></canvas></div></div>
     <div class="card"><h2>CPI Trend (7D avg)</h2><div class="chart-container"><canvas id="cpiChart"></canvas></div></div>
-  </div>`;
+  </div>
+
+  <!-- Sources -->
+  <div class="chart-row">
+    <div class="card"><h2>ROAS theo Source</h2><div class="chart-container"><canvas id="srcRoas"></canvas></div></div>
+    <div class="card"><h2>Lãi / Lỗ theo Source</h2><div class="chart-container"><canvas id="srcProfit"></canvas></div></div>
+  </div>
+  <div class="card"><h2>ROAS D3 theo Tuần × Source</h2><div class="chart-container-lg"><canvas id="weeklyRoas"></canvas></div></div>
+  <div class="chart-row">
+    <div class="card"><h2>Phân bổ Spend</h2><div class="chart-container"><canvas id="spendPie"></canvas></div></div>
+    <div class="card"><h2>ROAS Cohort Curves</h2><div class="chart-container"><canvas id="cohortChart"></canvas></div></div>
+  </div>
+
+  <!-- GEO -->
+  ${(() => {
+    const t1 = DATA.geoData.filter(g=>g.tier==='Tier 1').sort((a,b)=>b.cost-a.cost);
+    const t2 = DATA.geoData.filter(g=>g.tier==='Tier 2').sort((a,b)=>b.cost-a.cost);
+    const t34 = DATA.geoData.filter(g=>g.tier==='Tier 3-4').sort((a,b)=>b.cost-a.cost);
+    function gt(d,t) { return '<div class="card"><h2>'+t+'</h2><table class="mom-table"><thead><tr><th style="text-align:left">Country</th><th>Installs</th><th>Spend</th><th>ROAS</th><th>CPI</th></tr></thead><tbody>'+d.slice(0,15).map(g=>'<tr><td style="text-align:left;font-weight:700">'+g.country+'</td><td>'+g.installs.toLocaleString()+'</td><td>'+fmtK(g.cost)+'</td><td class="'+(g.roas>=100?'roas-good':'roas-bad')+'">'+fmtPct(g.roas)+'</td><td>$'+g.cpi.toFixed(4)+'</td></tr>').join('')+'</tbody></table></div>'; }
+    return gt(t1,'Tier 1 (US/DE/UK/JP/KR/CA/AU)') + gt(t2,'Tier 2 (FR/TW/RU/BR/MX)') + gt(t34,'Tier 3-4 (Top 15)');
+  })()}
+
+  <!-- Cảnh báo suy giảm -->
+  ${(() => {
+    const declining = DATA.campaigns.filter(c => c.signals && c.signals.length > 0 && !c.isTest).sort((a,b) => b.signals.length - a.signals.length);
+    if (declining.length === 0) return '';
+    return '<div class="card"><h2>⚠️ Campaigns có dấu hiệu suy giảm (' + declining.length + ')</h2><table class="mom-table"><thead><tr><th style="text-align:left">Campaign</th><th>Source</th><th>ROAS</th><th>7D ROAS</th><th>Score</th><th style="text-align:left">Dấu hiệu</th></tr></thead><tbody>' +
+      declining.map(c => '<tr><td style="text-align:left;font-size:12px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + c.name + '</td><td style="text-align:center">' + c.source + '</td><td class="' + (c.roas>=100?'roas-good':'roas-bad') + '">' + fmtPct(c.roas) + '</td><td class="' + (c.roas7d>=100?'roas-good':'roas-bad') + '">' + fmtPct(c.roas7d) + '</td><td style="text-align:center;color:' + scoreColor(c.score) + ';font-weight:700">' + c.score + '</td><td style="text-align:left;font-size:11px">' + c.signals.map(s => '<span style="color:' + (s.sev==='high'?'var(--bad)':'var(--warn)') + '">' + (s.sev==='high'?'🔴':'⚠️') + ' ' + s.msg + '</span>').join('<br>') + '</td></tr>').join('') +
+      '</tbody></table></div>';
+  })()}
+
+  <!-- Campaign Health Scoreboard -->
+  <div class="card"><h2>Campaign Health Scoreboard</h2>
+  <table class="mom-table"><thead><tr><th style="text-align:left">Campaign</th><th>Source</th><th>Score</th><th>ROAS</th><th>CPI</th><th>7D Spend</th><th>Action</th></tr></thead><tbody>
+  ${DATA.campaigns.filter(c=>!c.isTest).sort((a,b)=>b.score-a.score).map(c => `<tr>
+    <td style="text-align:left;font-size:12px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
+    <td style="text-align:center">${c.source}</td>
+    <td style="text-align:center;color:${scoreColor(c.score)};font-weight:700">${c.score}</td>
+    <td class="${c.roas>=100?'roas-good':'roas-bad'}">${fmtPct(c.roas)}</td>
+    <td>$${c.cpi.toFixed(4)}</td>
+    <td>${fmtK(c.cost7d)}</td>
+    <td><span class="badge ${actionBadge[c.action]||'badge-test'}">${actionIcon[c.action]||''} ${c.action}</span></td>
+  </tr>`).join('')}
+  </tbody></table></div>`;
+
   el.innerHTML = html;
 
+  // Charts
   new Chart('roasChart', {type:'line', data:{labels:DATA.trendDates, datasets:[
     {label:'ROAS 7D avg',data:DATA.trendRoas,borderColor:'#ef4444',backgroundColor:'rgba(239,68,68,0.1)',fill:true,tension:0.3,pointRadius:0},
     {label:'Breakeven',data:DATA.trendDates.map(()=>100),borderColor:'#666',borderDash:[5,5],pointRadius:0}
@@ -634,21 +729,10 @@ function renderOverview(el) {
   new Chart('cpiChart', {type:'line', data:{labels:DATA.trendDates, datasets:[
     {label:'CPI 7D avg',data:DATA.trendCpi,borderColor:'#6366f1',tension:0.3,pointRadius:0,fill:true,backgroundColor:'rgba(99,102,241,0.1)'}
   ]}, options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#9ca3af'}}},scales:{x:{ticks:{color:'#666',maxTicksLimit:8}},y:{ticks:{color:'#666'}}}}});
-}
-
-function renderSources(el) {
-  let html = `
-  <div class="chart-row">
-    <div class="card"><h2>ROAS theo Source</h2><div class="chart-container"><canvas id="srcRoas"></canvas></div></div>
-    <div class="card"><h2>Lãi / Lỗ theo Source</h2><div class="chart-container"><canvas id="srcProfit"></canvas></div></div>
-  </div>
-  <div class="card"><h2>ROAS D3 theo Tuần × Source</h2><div class="chart-container-lg"><canvas id="weeklyRoas"></canvas></div></div>
-  <div class="card"><h2>Phân bổ Spend</h2><div class="chart-container"><canvas id="spendPie"></canvas></div></div>`;
-  el.innerHTML = html;
 
   const srcC = DATA.srcNames.map(n => DATA.srcRoas[DATA.srcNames.indexOf(n)] >= 100 ? '#22c55e' : '#ef4444');
   new Chart('srcRoas', {type:'bar', data:{labels:DATA.srcNames, datasets:[{data:DATA.srcRoas,backgroundColor:srcC}]},
-    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},annotation:{}},scales:{x:{ticks:{color:'#666'}},y:{ticks:{color:'#ccc'}}}}});
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#666'}},y:{ticks:{color:'#ccc'}}}}});
 
   const profitC = DATA.srcProfit.map(v => v >= 0 ? '#22c55e' : '#ef4444');
   new Chart('srcProfit', {type:'bar', data:{labels:DATA.srcNames, datasets:[{data:DATA.srcProfit,backgroundColor:profitC}]},
@@ -664,63 +748,42 @@ function renderSources(el) {
   const pieC = DATA.srcNames.map(n => srcColorMap[n]||'#999');
   new Chart('spendPie', {type:'doughnut', data:{labels:DATA.srcNames, datasets:[{data:DATA.srcSpend,backgroundColor:pieC,borderWidth:0}]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#ccc'}}}}});
-}
 
-function renderCohort(el) {
-  let html = `<div class="alert"><h3>⚠️ Không campaign nào payback trong 30 ngày</h3><ul>
-    <li>ROAS D30 cao nhất chỉ ~65% — cần D60-90+ để đạt 100%</li>
-    <li>Revenue multiplier D7→D30 trung vị = 1.23x</li>
-  </ul></div>
-  <div class="card"><h2>ROAS Cohort Curves — Revenue tích lũy theo ngày cài</h2><div class="chart-container-lg"><canvas id="cohortChart"></canvas></div></div>`;
-  el.innerHTML = html;
-
-  const colors = ['#6366f1','#ef4444','#22c55e','#f59e0b','#a855f7','#06b6d4','#f97316','#ec4899','#14b8a6','#8b5cf6'];
-  const datasets = Object.entries(DATA.cohortCurves).map(([name, vals], i) => ({
-    label:name, data:vals, borderColor:colors[i%colors.length], tension:0.3, pointRadius:2
+  const cColors = ['#6366f1','#ef4444','#22c55e','#f59e0b','#a855f7','#06b6d4','#f97316','#ec4899','#14b8a6','#8b5cf6'];
+  const cds = Object.entries(DATA.cohortCurves).map(([name, vals], i) => ({
+    label:name, data:vals, borderColor:cColors[i%cColors.length], tension:0.3, pointRadius:2
   }));
-  datasets.push({label:'Breakeven 100%',data:DATA.cohortDays.map(()=>100),borderColor:'#fff',borderDash:[6,4],pointRadius:0,borderWidth:2});
-  new Chart('cohortChart', {type:'line', data:{labels:DATA.cohortDays, datasets},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#9ca3af',font:{size:10}}}},scales:{x:{title:{display:true,text:'Ngày sau cài đặt',color:'#666'},ticks:{color:'#666'}},y:{title:{display:true,text:'ROAS Cohort (%)',color:'#666'},ticks:{color:'#666'},min:0,max:120}}}});
+  cds.push({label:'Breakeven',data:DATA.cohortDays.map(()=>100),borderColor:'#fff',borderDash:[6,4],pointRadius:0,borderWidth:2});
+  new Chart('cohortChart', {type:'line', data:{labels:DATA.cohortDays, datasets:cds},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#9ca3af',font:{size:9}}}},scales:{x:{ticks:{color:'#666'}},y:{ticks:{color:'#666'},min:0,max:120}}}});
 }
 
-function renderGeo(el) {
-  const t1 = DATA.geoData.filter(g=>g.tier==='Tier 1').sort((a,b)=>b.cost-a.cost);
-  const t2 = DATA.geoData.filter(g=>g.tier==='Tier 2').sort((a,b)=>b.cost-a.cost);
-  const t34 = DATA.geoData.filter(g=>g.tier==='Tier 3-4').sort((a,b)=>b.cost-a.cost);
-
-  function geoTable(data, title) {
-    return `<div class="card"><h2>${title}</h2><table class="mom-table"><thead><tr><th style="text-align:left">Country</th><th>Installs</th><th>Spend</th><th>ROAS</th><th>CPI</th></tr></thead><tbody>
-    ${data.slice(0,15).map(g => `<tr><td style="text-align:left;font-weight:700">${g.country}</td><td>${g.installs.toLocaleString()}</td><td>${fmtK(g.cost)}</td><td class="${g.roas>=100?'roas-good':'roas-bad'}">${fmtPct(g.roas)}</td><td>$${g.cpi.toFixed(4)}</td></tr>`).join('')}
-    </tbody></table></div>`;
-  }
-  el.innerHTML = geoTable(t1,'Tier 1 (US/DE/UK/JP/KR/CA/AU)') + geoTable(t2,'Tier 2 (FR/TW/RU/BR/MX)') + geoTable(t34,'Tier 3-4 (Top 15 theo spend)');
-}
-
-function renderCampaigns(el) {
+// =============================================
+// CHI TIẾT CAMPAIGN
+// =============================================
+function renderDetailCampaigns(el) {
   let filterHtml = `<div class="filter-group">
     <button class="filter-btn active" onclick="filterCamp('all',this)">Tất cả (${DATA.campaigns.length})</button>
     <button class="filter-btn" onclick="filterCamp('SCALE',this)">⭐ Scale</button>
     <button class="filter-btn" onclick="filterCamp('KEEP',this)">✅ Keep</button>
     <button class="filter-btn" onclick="filterCamp('OPTIMIZE',this)">⚠️ Optimize</button>
     <button class="filter-btn" onclick="filterCamp('REDUCE',this)">🔻 Reduce</button>
-    <button class="filter-btn" onclick="filterCamp('issues',this)">🔴 Có vấn đề</button>
+    <button class="filter-btn" onclick="filterCamp('declining',this)">📉 Suy giảm</button>
     <button class="filter-btn" onclick="filterCamp('TEST',this)">🧪 Test</button>
   </div><div id="campList"></div>`;
   el.innerHTML = filterHtml;
-  window._currentFilter = 'all';
   renderCampList('all');
 }
 
 function filterCamp(filter, btn) {
   document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
-  window._currentFilter = filter;
   renderCampList(filter);
 }
 
 function renderCampList(filter) {
   let camps = DATA.campaigns;
-  if (filter === 'issues') camps = camps.filter(c => c.issues.length > 0 && !c.isTest);
+  if (filter === 'declining') camps = camps.filter(c => c.signals && c.signals.length > 0 && !c.isTest);
   else if (filter !== 'all') camps = camps.filter(c => c.action === filter);
 
   const listEl = document.getElementById('campList');
@@ -728,8 +791,21 @@ function renderCampList(filter) {
     const sc = scoreColor(c.score);
     const badgeCls = actionBadge[c.action] || 'badge-test';
     const icon = actionIcon[c.action] || '';
-    const hasIssues = c.issues.length > 0;
+    const hasSignals = c.signals && c.signals.length > 0;
 
+    // Decline signals
+    let signalsHtml = '';
+    if (hasSignals) {
+      signalsHtml = `<div class="section-title">📉 Dấu hiệu suy giảm</div>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+        ${c.signals.map(s => `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:${s.sev==='high'?'rgba(239,68,68,0.15)':'rgba(245,158,11,0.15)'}">
+          <span style="font-size:16px">${s.sev==='high'?'🔴':'⚠️'}</span>
+          <span style="font-size:13px;color:${s.sev==='high'?'var(--bad)':'var(--warn)'}">${s.msg}</span>
+        </div>`).join('')}
+        </div>`;
+    }
+
+    // Cohort ROAS
     let cohortHtml = '';
     if (Object.keys(c.cohortRoas).length > 0) {
       cohortHtml = `<div class="section-title">ROAS Cohort</div><div class="cohort-inline">
@@ -737,6 +813,7 @@ function renderCampList(filter) {
       </div>`;
     }
 
+    // Weekly performance
     let weeklyHtml = '';
     if (c.weeklyPerf && c.weeklyPerf.length > 0) {
       weeklyHtml = `<div class="section-title">Performance theo Tuần</div>
@@ -750,26 +827,55 @@ function renderCampList(filter) {
         </tbody></table>`;
     }
 
+    // GEO × Weekly ROAS trend
+    let geoWeeklyHtml = '';
+    if (c.geoWeekly && c.geoWeekly.length > 0) {
+      const geoNames = [...new Set(c.geoWeekly.map(g=>g.geo))];
+      const geoWeeks = [...new Set(c.geoWeekly.map(g=>g.week))];
+      geoWeeklyHtml = `<div class="section-title">ROAS theo GEO × Tuần</div>
+        <table class="geo-table"><thead><tr><th>GEO</th>${geoWeeks.map(w=>'<th>'+w+'</th>').join('')}</tr></thead><tbody>
+        ${geoNames.map(geo => {
+          const gData = c.geoWeekly.filter(g=>g.geo===geo);
+          return '<tr><td style="font-weight:700">'+geo+'</td>' + geoWeeks.map(w => {
+            const d = gData.find(g=>g.week===w);
+            if (!d) return '<td style="text-align:right;color:var(--text2)">—</td>';
+            return '<td style="text-align:right" class="'+(d.roas>=100?'roas-good':'roas-bad')+'">'+fmtPct(d.roas)+'</td>';
+          }).join('') + '</tr>';
+        }).join('')}
+        </tbody></table>`;
+    }
+
+    // Ad-level performance
+    let adHtml = '';
+    if (c.adPerf && c.adPerf.length > 0) {
+      adHtml = `<div class="section-title">Performance theo Ad/Creative</div>
+        <table class="geo-table"><thead><tr><th>Ad</th><th>Users</th><th>Spend</th>${c.adPerf[0].roas_d3!==undefined?'<th>ROAS D3</th>':''}${c.adPerf[0].roas_d7!==undefined?'<th>ROAS D7</th>':''}${c.adPerf[0].roas_d14!==undefined?'<th>ROAS D14</th>':''}${c.adPerf[0].roas_d30!==undefined?'<th>ROAS D30</th>':''}</tr></thead><tbody>
+        ${c.adPerf.map(a => `<tr>
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${a.ad}">${a.ad}</td>
+          <td style="text-align:right">${a.users.toLocaleString()}</td>
+          <td style="text-align:right">${fmtK(a.cost)}</td>
+          ${a.roas_d3!==undefined?'<td style="text-align:right" class="'+(a.roas_d3>=100?'roas-good':'roas-bad')+'">'+fmtPct(a.roas_d3)+'</td>':''}
+          ${a.roas_d7!==undefined?'<td style="text-align:right" class="'+(a.roas_d7>=100?'roas-good':'roas-bad')+'">'+fmtPct(a.roas_d7)+'</td>':''}
+          ${a.roas_d14!==undefined?'<td style="text-align:right" class="'+(a.roas_d14>=100?'roas-good':'roas-bad')+'">'+fmtPct(a.roas_d14)+'</td>':''}
+          ${a.roas_d30!==undefined?'<td style="text-align:right" class="'+(a.roas_d30>=100?'roas-good':'roas-bad')+'">'+fmtPct(a.roas_d30)+'</td>':''}
+        </tr>`).join('')}
+        </tbody></table>`;
+    }
+
+    // GEO static breakdown
     let geoHtml = '';
     if (c.geos.length > 0) {
-      geoHtml = `<div class="section-title">GEO Breakdown</div><table class="geo-table"><thead><tr><th>Country</th><th>Tier</th><th>Spend</th><th>Installs</th><th>CPI</th><th>ROAS</th></tr></thead><tbody>
+      geoHtml = `<div class="section-title">GEO Breakdown (Tổng)</div><table class="geo-table"><thead><tr><th>Country</th><th>Tier</th><th>Spend</th><th>Installs</th><th>CPI</th><th>ROAS</th></tr></thead><tbody>
         ${c.geos.map(g => `<tr><td>${g.country}</td><td>${g.tier}</td><td>${fmt$(g.cost)}</td><td>${g.installs.toLocaleString()}</td><td>$${g.cpi.toFixed(4)}</td><td class="${g.roas>=100?'roas-good':'roas-bad'}">${fmtPct(g.roas)}</td></tr>`).join('')}
       </tbody></table>`;
     }
 
-    let issuesHtml = '';
-    if (hasIssues) {
-      issuesHtml = `<div class="section-title">Vấn đề phát hiện</div><ul class="issue-list">
-        ${c.issues.map(iss => `<li class="${iss.includes('rất thấp')||iss.includes('bão hòa nặng')?'critical':''}">${iss}</li>`).join('')}
-      </ul>`;
-    }
-
-    return `<div class="campaign-card" data-action="${c.action}" data-issues="${hasIssues}">
+    return `<div class="campaign-card" data-action="${c.action}">
       <div class="campaign-header" onclick="this.nextElementSibling.classList.toggle('open')">
         <div style="display:flex;align-items:center;gap:12px;flex:1;min-width:0">
           <div class="score-circle" style="background:${sc}20;color:${sc};flex-shrink:0">${c.score}</div>
           <div style="min-width:0"><div class="camp-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</div>
-            <div style="font-size:11px;color:var(--text2)">${c.source} • ${c.tier} • ${c.lifecycle} • ${c.daysRunning||'?'}d</div>
+            <div style="font-size:11px;color:var(--text2)">${c.source} • ${c.tier} • ${c.lifecycle} • ${c.daysRunning||'?'}d${hasSignals?' • <span style="color:var(--bad)">📉 '+c.signals.length+' dấu hiệu</span>':''}</div>
           </div>
         </div>
         <div class="camp-badges">
@@ -779,11 +885,12 @@ function renderCampList(filter) {
         </div>
       </div>
       <div class="campaign-detail">
+        ${signalsHtml}
         <div class="detail-grid">
           <div class="detail-item"><div class="detail-label">Total Spend</div><div class="detail-value">${fmtK(c.cost)}</div></div>
           <div class="detail-item"><div class="detail-label">Revenue</div><div class="detail-value">${fmtK(c.revenue)}</div></div>
           <div class="detail-item"><div class="detail-label">Profit</div><div class="detail-value" style="color:${c.profit>=0?'var(--good)':'var(--bad)'}">$${c.profit.toLocaleString()}</div></div>
-          <div class="detail-item"><div class="detail-label">ROAS</div><div class="detail-value" style="color:${c.roas>=100?'var(--good)':'var(--bad)'}"> ${fmtPct(c.roas)}</div><div class="detail-sub">7D: ${fmtPct(c.roas7d)} (${c.roasChange>0?'+':''}${c.roasChange}%)</div></div>
+          <div class="detail-item"><div class="detail-label">ROAS</div><div class="detail-value" style="color:${c.roas>=100?'var(--good)':'var(--bad)'}">${fmtPct(c.roas)}</div><div class="detail-sub">7D: ${fmtPct(c.roas7d)} (${c.roasChange>0?'+':''}${c.roasChange}%)</div></div>
           <div class="detail-item"><div class="detail-label">CPI</div><div class="detail-value">$${c.cpi.toFixed(4)}</div><div class="detail-sub">7D: $${c.cpi7d.toFixed(4)} (${c.cpiChange>0?'+':''}${c.cpiChange}%) • ${c.cpiBenchmark==='low'?'✅ Thấp':c.cpiBenchmark==='ok'?'⚡ OK':c.cpiBenchmark==='high'?'🔴 Cao':'—'}</div></div>
           <div class="detail-item"><div class="detail-label">ARPU</div><div class="detail-value">$${c.arpu.toFixed(4)}</div></div>
           <div class="detail-item"><div class="detail-label">Installs</div><div class="detail-value">${c.installs.toLocaleString()}</div><div class="detail-sub">7D: ${c.inst7d.toLocaleString()} (${c.instChange>0?'+':''}${c.instChange}%)</div></div>
@@ -796,48 +903,12 @@ function renderCampList(filter) {
         </div>
         ${cohortHtml}
         ${weeklyHtml}
+        ${geoWeeklyHtml}
+        ${adHtml}
         ${geoHtml}
-        ${issuesHtml}
       </div>
     </div>`;
   }).join('');
-}
-
-function renderProblems(el) {
-  const ps = DATA.problemSources;
-  let html = `<div class="alert"><h3>⚠️ 3 vấn đề lớn nhất cần xử lý</h3><ul>
-    <li><strong>ROAS suy giảm toàn diện:</strong> T1 125% → T2 111% → T3 84% — tuần gần nhất chỉ 66%!</li>
-    <li><strong>AppLovin + Unity lỗ $30K:</strong> ROAS liên tục dưới 100% nhiều tuần</li>
-    <li><strong>ARPU organic giảm 79%:</strong> $0.57 → $0.12 — vấn đề từ game, không chỉ UA</li>
-  </ul></div>`;
-
-  // Problem source charts
-  for (const [name, data] of Object.entries(ps)) {
-    html += `<div class="card"><h2>${name} — ROAS tuần (Tổng lỗ: $${Math.abs(data.totalLoss).toLocaleString()})</h2><div class="chart-container"><canvas id="prob_${name}"></canvas></div></div>`;
-  }
-
-  // Campaigns with issues
-  const issueCamps = DATA.campaigns.filter(c => c.issues.length > 0 && !c.isTest).sort((a,b) => a.roas - b.roas);
-  html += `<div class="card"><h2>Campaigns gặp vấn đề (${issueCamps.length})</h2><table class="mom-table"><thead><tr>
-    <th style="text-align:left">Campaign</th><th>Source</th><th>ROAS</th><th>7D ROAS</th><th>Score</th><th>Vấn đề</th></tr></thead><tbody>
-    ${issueCamps.map(c => `<tr>
-      <td style="text-align:left;font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name}</td>
-      <td style="text-align:center">${c.source}</td>
-      <td class="${c.roas>=100?'roas-good':'roas-bad'}">${fmtPct(c.roas)}</td>
-      <td class="${c.roas7d>=100?'roas-good':'roas-bad'}">${fmtPct(c.roas7d)}</td>
-      <td style="text-align:center;color:${scoreColor(c.score)};font-weight:700">${c.score}</td>
-      <td style="text-align:left;font-size:11px;color:var(--warn)">${c.issues.join('; ')}</td>
-    </tr>`).join('')}
-  </tbody></table></div>`;
-  el.innerHTML = html;
-
-  for (const [name, data] of Object.entries(ps)) {
-    const barC = data.roas.map(v => v >= 100 ? '#22c55e' : '#ef4444');
-    new Chart(`prob_${name}`, {type:'bar', data:{labels:data.weeks, datasets:[
-      {data:data.roas,backgroundColor:barC},
-      {type:'line',data:data.weeks.map(()=>100),borderColor:'#fff',borderDash:[5,5],pointRadius:0,borderWidth:2}
-    ]}, options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#666'}},y:{ticks:{color:'#666'},min:0,max:140}}}});
-  }
 }
 
 function renderAction(el) {
